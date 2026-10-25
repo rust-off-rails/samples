@@ -25,6 +25,7 @@ tools/ci.sh           For each sample, and for "all": fresh copy of host/ + inst
 | `dev-mailbox` | mailer | A local mailbox at `/dev/mailbox`: live inbox (SSE), HTML/text/raw/headers, desktop/mobile/dark previews, extracted links and codes, attachments, search, clear, `.eml` download. Dev-only, never routed in production. |
 | `jobs` | — | A DB-backed job queue (Oban-style): Postgres `FOR UPDATE SKIP LOCKED`, SQLite single-writer claim, retries with backoff and jitter, unique jobs, priorities, scheduled and cron jobs, timeouts, rescue of orphaned jobs, graceful shutdown, pruning |
 | `jobs-dashboard` | jobs | `/admin/jobs`: overview, queues, states, job detail with errors and args, retry/cancel/discard, cron, live refresh; admin-only |
+| `webhooks` | jobs | Signed inbound webhooks: `POST /webhooks/{provider}` verifies the HMAC over the raw body (GitHub and Stripe schemes) in constant time, refuses stale timestamps, stores each event once (a replay is a no-op), and does the work in a job; a provider without a secret answers 404 |
 | `auth-password` | mailer | Email + password: argon2id, signup, email verification, login, logout, password reset, session rotation, rate limits and lockout, no user enumeration |
 | `auth-magic-link` | mailer | Passwordless sign-in: single-use, hashed, short-lived tokens; "check your mailbox" hint in dev |
 | `auth-totp` | auth-password or auth-magic-link | TOTP 2FA (RFC 6238): enrol with QR code, verify, recovery codes, step-up on sensitive actions, replay protection |
