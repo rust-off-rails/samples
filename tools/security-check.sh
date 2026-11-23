@@ -36,8 +36,10 @@ if [ -n "$markers" ]; then
   while IFS= read -r line; do
     count=$((count + 1))
     where=$(printf '%s' "$line" | cut -d: -f1-2)
-    names=$(printf '%s\n' "$line" | grep -oE '\(test: [a-z_][a-z0-9_]*(, [a-z_][a-z0-9_]*)*\)' \
-      | sed 's/^(test: //; s/)$//' | tr ',' '\n' | tr -d ' ' || true)
+    # A marker may end with the file the test lives in: `(test: <name>, kernel_test.rs)`.
+    names=$(printf '%s\n' "$line" \
+      | grep -oE '\(test: [a-z_][a-z0-9_]*(, [a-z_][a-z0-9_]*)*(, [a-z_][a-z0-9_/]*\.rs)?\)' \
+      | sed 's/^(test: //; s/)$//; s/, [a-z_][a-z0-9_/]*\.rs$//' | tr ',' '\n' | tr -d ' ' || true)
     if [ -z "$names" ]; then
       fail "$where: SECURITY marker names no test; add (test: <name>)"
       continue
