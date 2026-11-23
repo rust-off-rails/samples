@@ -35,7 +35,15 @@ pub struct TlsFiles {
 pub struct Config {
     pub env: AppEnv,
     pub database_url: String,
+    /// `DATABASE_POOL`: 4 for SQLite (one writer at a time; each connection keeps its own page
+    /// cache), 10 for Postgres.
     pub database_pool: u32,
+    /// `APP_WORKER_THREADS`: Tokio worker threads (default 2). Raise it for CPU-bound request work
+    /// on a box with more cores; I/O-bound apps rarely gain past 2–4.
+    pub worker_threads: usize,
+    /// `APP_BLOCKING_THREADS`: the cap on Tokio's blocking pool (default 16; Tokio's own is 512).
+    /// `spawn_blocking` work (static files, password hashing) queues past it instead of adding threads.
+    pub blocking_threads: usize,
     pub app_url: String,
     pub port: u16,
     /// `APP_SHUTDOWN_DRAIN_SECS`: how long open connections get after SIGTERM.
@@ -66,6 +74,8 @@ impl fmt::Debug for Config {
         d.field("env", &self.env)
             .field("database_url", &"[redacted]")
             .field("database_pool", &self.database_pool)
+            .field("worker_threads", &self.worker_threads)
+            .field("blocking_threads", &self.blocking_threads)
             .field("app_url", &self.app_url)
             .field("port", &self.port)
             .field("shutdown_drain", &self.shutdown_drain)
@@ -181,7 +191,10 @@ impl Config {
         };
         // PORT first: the development APP_URL default depends on it.
         let port = parse_num("PORT", 3000) as u16;
-        let database_pool = parse_num("DATABASE_POOL", 10) as u32;
+        // 0 = the backend's default, chosen below once DATABASE_URL is known.
+        let database_pool = parse_num("DATABASE_POOL", 0) as u32;
+        let worker_threads = (parse_num("APP_WORKER_THREADS", 2) as usize).max(1);
+        let blocking_threads = (parse_num("APP_BLOCKING_THREADS", 16) as usize).max(1);
         let shutdown_drain = Duration::from_secs(parse_num("APP_SHUTDOWN_DRAIN_SECS", 5));
         let dev_http_port = get("APP_DEV_HTTP_PORT").map(|v| {
             v.parse::<u16>().unwrap_or_else(|_| {
@@ -209,6 +222,11 @@ impl Config {
                 String::new()
             }
             None => DEV_DATABASE_URL.into(),
+        };
+        let database_pool = match database_pool {
+            0 if database_url.starts_with("sqlite:") => 4,
+            0 => 10,
+            n => n,
         };
         if production && get("APP_URL").is_none() {
             missing.push("APP_URL".into());
@@ -260,6 +278,8 @@ impl Config {
             env,
             database_url,
             database_pool,
+            worker_threads,
+            blocking_threads,
             app_url,
             port,
             shutdown_drain,
@@ -281,6 +301,8 @@ impl Config {
             env: AppEnv::Test,
             database_url: "sqlite::memory:".into(),
             database_pool: 5,
+            worker_threads: 2,
+            blocking_threads: 16,
             app_url: dev_app_url(3000, false),
             port: 3000,
             shutdown_drain: Duration::from_secs(5),

@@ -18,7 +18,9 @@ pub async fn connect(url: &str, max_connections: u32) -> Result<DatabaseConnecti
         // Every connection to an in-memory database is a different, empty database.
         let in_memory = url.contains(":memory:") || url.contains("mode=memory");
         opts.max_connections(if in_memory { 1 } else { max_connections })
-            .min_connections(if in_memory { 1 } else { 0 });
+            .min_connections(if in_memory { 1 } else { 0 })
+            // WHY: idle connections close after a minute, so a burst's extra caches don't stay.
+            .idle_timeout(Duration::from_secs(60));
         if !in_memory {
             ensure_parent_dir(url);
         }
@@ -28,7 +30,11 @@ pub async fn connect(url: &str, max_connections: u32) -> Result<DatabaseConnecti
                 .create_if_missing(true)
                 .foreign_keys(true) // critical: SQLite ignores FKs otherwise
                 .busy_timeout(Duration::from_secs(5))
-                .synchronous(SqliteSynchronous::Normal);
+                .synchronous(SqliteSynchronous::Normal)
+                // WHY: each connection keeps its own page cache; 1 MiB (SQLite's default is 2 MiB)
+                // keeps a small app's memory flat, and the OS page cache still holds the file.
+                // A read-heavy app with a big database raises it (database.md#sqlite-memory).
+                .pragma("cache_size", "-1024");
             if in_memory {
                 o
             } else {
