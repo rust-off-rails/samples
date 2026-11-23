@@ -1,0 +1,18 @@
+# Weekly update PRs. host/ is the app every sample is tested in, and the parts reach the framework
+# from here, so updates (security ones especially) should show up here first.
+# (host/.github/dependabot.yml is the example app's own config; GitHub only reads this one.)
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /host
+    schedule: { interval: weekly, day: monday }
+    groups:
+      host-patch:
+        update-types: [patch, minor]
+  # Actions are pinned by commit hash (the version is in the comment); this keeps the pins current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    groups:
+      actions:
+        patterns: ["*"]
