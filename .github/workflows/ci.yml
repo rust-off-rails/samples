@@ -2,6 +2,13 @@ name: CI
 on:
   push: { branches: [main] }
   pull_request:
+  # Weekly, so a new RustSec advisory or a breaking crate release fails here within a week,
+  # before the framework syncs the parts.
+  schedule: [{ cron: "17 6 * * 1" }]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency: { group: "ci-${{ github.ref }}", cancel-in-progress: true }
 
@@ -12,7 +19,7 @@ jobs:
   tools:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: shellcheck (POSIX sh tools)
         run: shellcheck tools/*.sh
       - name: Every SECURITY marker and CHECKS.md row cites a test that exists
@@ -32,14 +39,17 @@ jobs:
     env:
       TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with: { components: "rustfmt, clippy" }
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with: { workspaces: "host -> ../.cache/target" }
-      - uses: taiki-e/install-action@nextest
-      - uses: taiki-e/install-action@cargo-deny
-      - uses: taiki-e/install-action@cargo-audit
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with: { tool: nextest }
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with: { tool: cargo-deny }
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with: { tool: cargo-audit }
       - name: Vendor the framework release (checksum-verified)
         run: tools/vendor-framework.sh host
       - name: The host alone (the baseline every sample starts from)
@@ -56,15 +66,15 @@ jobs:
   windows-app:                  # every sample installed (POSIX tools), for the Windows job to build and test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with: { components: rustfmt }
       - run: tools/vendor-framework.sh host
       - name: Install every sample into one app (cargo fmt, CSS; no build)
         run: tools/ci.sh --prepare all
       - name: Pack it (tar keeps modes and LF line endings)
         run: tar -C .cache/ci/all -czf all-app.tar.gz app
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with: { name: all-app, path: all-app.tar.gz, retention-days: 3 }
 
   windows:                      # Windows found real bugs (a cfg(unix)-only const, a file renamed while open)
@@ -74,14 +84,15 @@ jobs:
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with: { name: all-app }
       - run: tar -xzf all-app.tar.gz
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with: { components: clippy }
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with: { workspaces: "app -> ../target" }
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with: { tool: nextest }
       - name: clippy -D warnings (all targets), and no unwrap/expect in shipped code
         working-directory: app
         run: |
@@ -96,11 +107,11 @@ jobs:
   e2e:                          # a real browser through boosted links: every interactive page works
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with: { workspaces: "host -> ../.cache/target" }
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
       - name: pnpm (the version tools/screenshots/package.json pins)
@@ -114,9 +125,9 @@ jobs:
   zap:                          # OWASP ZAP baseline against every sample installed, in production mode
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with: { workspaces: "host -> ../.cache/target" }
       - run: tools/vendor-framework.sh host
       # APP_ENV=production with fresh random secrets, email logged, admin views off (their default),
@@ -129,7 +140,7 @@ jobs:
           docker run --rm --network host -v "$PWD/.zap:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py -t http://localhost:3900 -c rules.tsv -r zap-report.html -m 2
       - if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with: { name: zap-report, path: .zap/zap-report.html, if-no-files-found: ignore }
       - if: always()
         run: tail -50 demo/demo.log || true
@@ -139,7 +150,7 @@ jobs:
   secrets:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
       - name: gitleaks (secrets in any commit)
         run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 git /repo --redact --no-banner
