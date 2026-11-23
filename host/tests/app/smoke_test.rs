@@ -17,7 +17,7 @@ async fn home_page_returns_200_and_renders_the_layout() {
     app.get("/")
         .await
         .assert_ok()
-        .assert_contains("<title>Offrails Host: the blank app every sample installs into</title>")
+        .assert_contains("<title>Offrails Host: The blank app every sample installs into</title>")
         .assert_contains("/static/app.css")
         .assert_contains(r#"rel="icon""#);
 }

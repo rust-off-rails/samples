@@ -5,11 +5,14 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
-/// The human product name: page titles, kernel UIs (/dev), the default MAIL_FROM.
-/// Never derived from the crate name: crates get renamed, products don't.
-pub const APP_NAME: &str = "Offrails Host";
-/// The home page title is "Offrails Host: <tagline>"; the social card carries it too.
-pub const APP_TAGLINE: &str = "the blank app every sample installs into";
+/// The human product name: page titles, kernel UIs (/dev), the default MAIL_FROM. It is
+/// brand.toml's `name` (`cargo offrails brand` writes src/brand.rs). Never derived from the crate
+/// name: crates get renamed, products don't.
+pub const APP_NAME: &str = crate::brand::NAME;
+/// The tagline: brand.toml's `tagline` (`cargo offrails brand` writes src/brand.rs), the one
+/// source for the home page title ("Offrails Host: <tagline>"), the social card and any nav that
+/// shows it. Change it in brand.toml, never here.
+pub const APP_TAGLINE: &str = crate::brand::TAGLINE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppEnv {

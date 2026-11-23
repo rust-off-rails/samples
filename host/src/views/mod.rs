@@ -1,6 +1,7 @@
 //! What the client receives: Askama page structs, one file per resource, plus the layout context.
 
 pub mod errors;
+pub mod gallery;
 pub mod helpers;
 pub mod home;
 // samples: view mods
