@@ -157,6 +157,28 @@ async fn x_forwarded_for_is_ignored_unless_a_proxy_is_trusted() {
     assert_eq!(client_ip(&trusted, Some("not-an-ip")).await, None);
 }
 
+/// Behind two proxies (Cloudflare → Caddy → app) the client is the second hop from the right;
+/// the rightmost is Cloudflare's address, which every user would share as a rate-limit key.
+#[tokio::test]
+async fn the_client_ip_is_the_configured_hop_from_the_right() {
+    let app = TestApp::new().await;
+    let mut config = (*app.state.config).clone();
+    config.trusted_proxy = true;
+    config.trusted_proxy_hops = 2;
+    let trusted = TestApp::with_config(config).await;
+    assert_eq!(
+        client_ip(&trusted, Some("6.6.6.6, 203.0.113.9, 198.51.100.7")).await,
+        Some("203.0.113.9".parse().unwrap())
+    );
+    // A header shorter than the hop count was not written by our proxies: not trusted.
+    assert_eq!(client_ip(&trusted, Some("203.0.113.9")).await, None);
+    // A hop that isn't a bare IP (some proxies write ip:port) is never a client-chosen value.
+    assert_eq!(
+        client_ip(&trusted, Some("6.6.6.6, 203.0.113.9:4242, 198.51.100.7")).await,
+        None
+    );
+}
+
 /// `kernel::db::begin` is `BEGIN IMMEDIATE` on SQLite. Plain deferred transactions that read then
 /// write under concurrency fail with "database is locked" (SQLITE_BUSY_SNAPSHOT), and an
 /// in-memory database (one connection) can't show it, so this uses a file.
@@ -210,4 +232,72 @@ async fn concurrent_read_then_write_transactions_do_not_fail_with_database_is_lo
         .unwrap()
         .unwrap();
     assert_eq!(row.try_get::<i32>("", "n").unwrap(), 8, "no lost updates");
+}
+
+/// Postgres test slots (testing.md#postgres-test-databases): the reset empties what a test
+/// wrote, and refuses once a test changed the schema (the harness then clones a fresh slot).
+#[tokio::test]
+async fn the_postgres_test_reset_empties_tables_and_refuses_a_changed_schema() {
+    let app = TestApp::new().await;
+    if app.on_sqlite() {
+        return;
+    }
+    let db = app.db();
+    let cache = Cache::new(db.clone());
+    cache
+        .write("left-over", &1u32, Duration::from_secs(60))
+        .await
+        .unwrap();
+    kernel::db::reset_test_database(db).await.unwrap();
+    let rows = db
+        .query_one_raw(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "SELECT count(*) AS n FROM cache_entries",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rows.try_get::<i64>("", "n").unwrap(), 0);
+
+    db.execute_unprepared("CREATE TABLE planted (id BIGSERIAL PRIMARY KEY)")
+        .await
+        .unwrap();
+    let refused = kernel::db::reset_test_database(db).await.unwrap_err();
+    assert!(refused.to_string().contains("schema changed"), "{refused}");
+}
+
+/// An unset `APP_ENV` is an error, never a default: run the binary in a directory with no `.env`,
+/// so the fallback has nothing to load (config.rs).
+#[test]
+fn an_unset_app_env_refuses_to_boot() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_offrails_host"))
+        .args(["db", "status"])
+        .env_remove("APP_ENV")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("APP_ENV is not set"), "{err}");
+}
+
+#[test]
+fn ipv6_clients_share_one_rate_limit_per_64() {
+    use offrails_host::controllers::application::ClientIp;
+    let key = |ip: &str| ClientIp(Some(ip.parse().unwrap())).key("login");
+    // The same /64, different interface ids: one budget.
+    assert_eq!(
+        key("2001:db8:1:2::1"),
+        key("2001:db8:1:2:ffff:ffff:ffff:ffff")
+    );
+    // Another /64, and an IPv4 address, are separate budgets.
+    assert_ne!(key("2001:db8:1:2::1"), key("2001:db8:1:3::1"));
+    assert_eq!(key("203.0.113.7"), "login:203.0.113.7");
+    assert_ne!(key("203.0.113.7"), key("203.0.113.8"));
+    // A dual-stack listener reports IPv4 clients as ::ffff:a.b.c.d: still one budget each, never
+    // one shared /64 for every IPv4 user.
+    assert_eq!(key("::ffff:203.0.113.7"), "login:203.0.113.7");
+    assert_ne!(key("::ffff:203.0.113.7"), key("::ffff:198.51.100.9"));
+    assert_eq!(ClientIp(None).key("login"), "login:unknown");
 }

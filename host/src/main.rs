@@ -62,19 +62,35 @@ enum DbCommand {
     Console,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // The route table is a constant: no config, no database, no APP_ENV needed.
+    if matches!(cli.command, Some(Command::Routes)) {
+        return print_routes();
+    }
     let config = Config::from_env()?;
+    // WHY: a lean runtime by default (APP_WORKER_THREADS=2, APP_BLOCKING_THREADS=16) instead of
+    // one worker per core and 512 blocking threads: each idle thread holds its stack and an
+    // allocator arena (checked by .offrails/tools/ci/memory-budget.sh).
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(config.worker_threads)
+        .max_blocking_threads(config.blocking_threads)
+        .enable_all()
+        .build()
+        .context("starting the Tokio runtime")?
+        .block_on(run(cli, config))
+}
+
+async fn run(cli: Cli, config: Config) -> anyhow::Result<()> {
     init_tracing(&config);
     for warning in config.boot_warnings() {
         tracing::warn!("{warning}");
     }
 
     match cli.command.unwrap_or(Command::Serve) {
-        // WHY at the top: an anchor after the last arm ends up on that arm's `}` once rustfmt has
-        // formatted a block arm above it, and later installs refuse to wire there.
         // samples: cli dispatch
+        // WHY: the anchor heads the match: after a last arm ending in `}`, rustfmt pulls a
+        // trailing comment onto that brace's line, and the next part's wiring would refuse.
         Command::Serve => serve(config).await,
         Command::Db { command } => db_command(config, command).await,
         Command::Routes => print_routes(),

@@ -17,7 +17,7 @@ async fn home_page_returns_200_and_renders_the_layout() {
     app.get("/")
         .await
         .assert_ok()
-        .assert_contains("<title>Offrails Host: the blank app every sample installs into</title>")
+        .assert_contains("<title>Offrails Host: The blank app every sample installs into</title>")
         .assert_contains("/static/app.css")
         .assert_contains(r#"rel="icon""#);
 }
@@ -136,17 +136,12 @@ async fn every_listed_route_is_routable_in_development() {
     let app = TestApp::with_config(config).await;
 
     for (method, path, handler, _access) in ROUTES {
-        let path = path
-            .replace("{id}", "1")
-            .replace("{n}", "0")
-            .replace("{token}", "not-a-real-token")
-            .replace("{mailer}", "no_such_mailer")
-            .replace("{action}", "no_such_action");
+        let path = crate::security_test::concrete(path);
         // WHY: GETs read headers only: a streaming route (SSE) never ends its body.
         let (status, headers) = match *method {
             "GET" => app.request_head(&path, &[]).await,
-            _ => {
-                let res = app.post_form(&path, &[]).await;
+            other => {
+                let res = app.request_method(other, &path).await;
                 (res.status, res.headers)
             }
         };
@@ -254,24 +249,30 @@ async fn robots_and_sitemap_are_absolute_and_exclude_private_pages() {
         .assert_not_contains("/dev");
 }
 
-/// The app layout boosts every link (`hx-boost="true"`): a boosted click swaps `<body>` and runs
-/// nothing in the next page's `<head>`. So no page that extends the app layout loads a script or
-/// a stylesheet in its `{% block head %}`; samples wire theirs at `samples: app head`, where every
-/// page loads them (samples/FORMAT.md#scripts-on-app-pages).
-#[test]
-fn app_pages_load_no_scripts_or_stylesheets_in_their_head_block() {
-    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        for entry in std::fs::read_dir(dir).expect("a templates dir").flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, out);
-            } else if path.extension().is_some_and(|e| e == "html") {
-                out.push(path);
-            }
+/// Every file under `dir` (recursively) with extension `ext`.
+fn files_with_extension(dir: &std::path::Path, ext: &str, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files_with_extension(&path, ext, out);
+        } else if path.extension().is_some_and(|e| e == ext) {
+            out.push(path);
         }
     }
+}
+
+/// The app layout boosts every link (`hx-boost="true"`): a boosted click swaps `<body>` and runs
+/// nothing in the next page's `<head>`. So no page that extends the app layout loads a script or
+/// a stylesheet in its `{% block head %}`; they load from the layout (`samples: app head`), where
+/// every page has them (guides/frontend-htmx.md#boosted-navigation). The browser check is
+/// `.offrails/tools/browser-smoke/smoke-boosted.mjs`.
+#[test]
+fn app_pages_load_no_scripts_or_stylesheets_in_their_head_block() {
     let mut files = Vec::new();
-    walk(std::path::Path::new("templates"), &mut files);
+    files_with_extension(std::path::Path::new("templates"), "html", &mut files);
     let mut found = Vec::new();
     for path in files {
         let source = std::fs::read_to_string(&path).expect("a readable template");
@@ -282,7 +283,7 @@ fn app_pages_load_no_scripts_or_stylesheets_in_their_head_block() {
             continue;
         };
         let head = &source[start..];
-        let head = &head[..head.find("{% endblock %}").unwrap_or(head.len())];
+        let head = &head[..head.find("{% endblock").unwrap_or(head.len())];
         if head.contains("<script") || head.contains("stylesheet") {
             found.push(path.display().to_string());
         }
@@ -290,5 +291,42 @@ fn app_pages_load_no_scripts_or_stylesheets_in_their_head_block() {
     assert!(
         found.is_empty(),
         "a boosted link never runs these: load them from the layout (samples: app head): {found:?}"
+    );
+}
+
+/// A script that binds on `DOMContentLoaded` (or `load`) binds once, on the first full load: after
+/// a boosted link the new page's elements are never bound. Bind by delegation on `document`, or
+/// also start on `htmx:load` for the elements a swap brings (guides/frontend-htmx.md#boosted-navigation).
+#[test]
+fn page_scripts_never_bind_only_on_dom_content_loaded() {
+    let mut files = Vec::new();
+    files_with_extension(std::path::Path::new("static"), "js", &mut files);
+    let mut found = Vec::new();
+    for path in files {
+        // vendor/: third-party files. kernel/: kernel pages aren't boosted, and the dev
+        // dashboard's load lab plants exactly this bug on purpose (`lab-widget.js`).
+        if path
+            .components()
+            .any(|c| c.as_os_str() == "vendor" || c.as_os_str() == "kernel")
+        {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("a readable script");
+        let code: String = source
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let on_load = code.contains("DOMContentLoaded")
+            || code.contains("window.onload")
+            || code.contains(r#"addEventListener("load""#);
+        if on_load && !code.contains("htmx:load") {
+            found.push(path.display().to_string());
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "these bind on DOMContentLoaded/load only, so a boosted link leaves the next page dead: \
+         delegate on document, or also start on htmx:load: {found:?}"
     );
 }

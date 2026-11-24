@@ -4,7 +4,7 @@
 
 ```
 APP:            offrails_host
-FRAMEWORK:      Rust off Rails 0.7.0 (.offrails/, vendored 2026-10-17)
+FRAMEWORK:      Rust off Rails 0.7.5 (.offrails/, vendored 2026-11-23)
 FRONTEND_MODE:  htmx
 UI_LIBRARY:     none   (none = no JS UI: htmx without islands, or api)
 ISLANDS:        no
@@ -31,6 +31,7 @@ Each line is a mistake an agent shipped. The check that catches it is in parenth
 - **NEVER tick an acceptance criterion without a test that cites its id,** or write a Security row without a test name (`offrails check`).
 - **NEVER edit `.offrails/` or delete a `docs/decisions.md` line.** Supersede it with a new line (`.offrails/workflow.md#decisions`).
 - **NEVER give an `id` or `*_id` a 32-bit column, or let the suite run only on SQLite.** `big_pk_auto`/`big_integer` and `i64`; `INT4` ids made every Postgres write a 500 behind a green SQLite suite (`offrails check` `[ids]`, `[postgres]`).
+- **NEVER bind development to `0.0.0.0` or drop the Host check to "make it work".** `/dev` has no login: the mailbox holds every sign-in link. A dev container or a phone sets `APP_BIND=0.0.0.0` and `APP_ALLOWED_HOSTS` on purpose (`offrails check` `[bind]`, `development_refuses_a_rebound_host_name`).
 - **NEVER `pkill`/`killall`, or kill by name or pattern.** Stop the PID file you started: `kill "$(cat storage/pids/dev-$PORT.pid)"` for `bin/dev` (it stops its whole tree), `serve-$PORT.pid` for a plain `serve` (`.offrails/cli.md#running-the-app-from-an-agent`). Killing only `bin/dev`'s listener leaves its watchers running.
 
 ## You are an agent working on a Rust off Rails app
@@ -40,6 +41,7 @@ Each line is a mistake an agent shipped. The check that catches it is in parenth
 3. Follow only the `FRONTEND_MODE` branch of each guide, and the `UI_LIBRARY` branch of the JS guides.
 4. Done means `.offrails/workflow.md#definition-of-done`, green, with each item's command run. Start with `sh .offrails/tools/offrails-check`.
 5. Log decisions not covered by `.offrails/` in `docs/decisions.md`; supersede, never edit.
+6. **Start app code from a snippet or a generator (both tested, both yours once copied); hand-write the rest.** `cargo offrails snippets` (`snippet show <name>` to read one), `cargo offrails g --help`; neither is mandatory. Commit after each run, then edit. Keep a feature in its own small files, and mark each line it adds to a shared file with its name (`// posts`).
 
 ## Quick commands
 
@@ -47,26 +49,39 @@ Each line is a mistake an agent shipped. The check that catches it is in parenth
 bin/setup                      # first run
 bin/dev                        # develop: open the URL it prints (https + HTTP/2 with mkcert, else http); tabs reload on save
 sh .offrails/tools/offrails-check   # mechanical gates: header, specs ↔ tests, tenancy, scoped lookups
-cargo nextest run              # tests (SQLite)
+cargo offrails verify          # after each slice: fmt, CSS, clippy, one build, SQLite + Postgres suites at once
+cargo offrails verify --full   # before saying done: + offrails-check, coverage, deny, gitleaks, routes, browser smokes incl. every page after a boosted link, and prove (BASE=…)
+BASE=… cargo offrails prove    # screenshots + checks of every page → docs/proof/PROOF.md: link it in your final message
+cargo offrails brand           # after editing brand.toml (colors, fonts, radius, logo); components: /dev/components
+cargo nextest run <name>       # one test while it's red (SQLite)
 docker compose up --build      # the whole app, production-shaped, on Postgres (http://localhost:3000)
-docker compose up -d db && TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres cargo nextest run   # tests on Postgres
+docker compose up -d db        # a Postgres for verify (or set TEST_DATABASE_URL in .env)
 cargo run -- db migrate        # migrate (any DATABASE_URL)
 cargo run -q -- introspect     # the app's state as JSON (development; live parts: $URL/dev/introspect.json)
 cargo run -- routes            # list routes (with access levels); rewrites docs/routes.md
-cargo llvm-cov nextest --summary-only --ignore-filename-regex 'src/main\.rs$'   # coverage (gate: 80%)
+cargo offrails snippets        # small tested code to copy: snippet show <name> (read), snippet add <name> (copy + wire)
+cargo offrails g --help        # generators: resource, model, controller (path params), page, api, job, mailer, channel, test
+cargo offrails list-parts      # parts (mailer, jobs, auth, realtime, dev dashboard): installed or available
+cargo offrails add-part <name> # add one when the product needs it (dependencies first; re-running is a no-op)
+cargo run -- jobs stats        # with the jobs part: job counts per state (dashboard: /admin/jobs; dev tools: /dev)
 ```
 
 ## App-specific notes
 
-This is the samples repo's host: the blank app every sample installs into and is tested in. It
-differs from a fresh `generators/new.md` app in two deliberate ways (docs/decisions.md):
+<!-- Agents: add durable, app-specific guidance here (domain vocabulary, tricky invariants). Keep it short and link to product/ specs. -->
 
-- The parts that ship as samples (mailer + dev mailbox, jobs + dashboard, accounts, realtime) are
-  not generated here; each sample adds its own.
+This is the samples repo's host: the blank app every sample installs into and is tested in. It is
+the framework's template app as `cargo offrails new` makes it, with no parts:
+
+- The parts (mailer + dev mailbox, jobs + dashboard, accounts, realtime, dev dashboard, webhooks)
+  are not in it; each sample adds its own, and `tools/ci.sh` proves it here.
 - Shared files carry one-line `samples: <anchor>` comments (`// samples: config fields`,
-  `{# samples: nav links #}`). `tools/install.sh` inserts a sample's wiring above the matching
-  anchor. Keep the anchors; they are inert comments.
+  `{# samples: nav links #}`). `tools/install.sh` (and `cargo offrails add-part`) inserts a
+  sample's wiring above the matching anchor. Keep the anchors; they are inert comments.
 
 ### Post-upgrade checks
 
 <!-- Agents: list app-specific things /offrails:upgrade must verify after a framework upgrade, e.g. "the footer shows .offrails/VERSION (test: footer_shows_framework_version)". -->
+
+- Compare with a fresh app of the new release: `cargo run -q --manifest-path "$FW/tools/offrails-gen/Cargo.toml" --target-dir <scratch>/target -- new <scratch>/ref offrails_host "Offrails Host" --pitch "the blank app every sample installs into" --parts none --no-git --offline`, then `diff -rq -x target -x .offrails -x storage <scratch>/ref host`. Only the differences docs/decisions.md names may remain (this file, product/README.md, .cargo/audit.toml, the home page's and `DEFAULT_DESCRIPTION`'s sentences, lock-file patches).
+- `tools/ci.sh all` with `TEST_DATABASE_URL` set: every sample still installs and is green on SQLite and Postgres against the upgraded host.

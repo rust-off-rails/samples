@@ -5,11 +5,14 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
-/// The human product name: page titles, kernel UIs (/dev), the default MAIL_FROM.
-/// Never derived from the crate name: crates get renamed, products don't.
-pub const APP_NAME: &str = "Offrails Host";
-/// The home page title is "Offrails Host: <tagline>"; the social card carries it too.
-pub const APP_TAGLINE: &str = "the blank app every sample installs into";
+/// The human product name: page titles, kernel UIs (/dev), the default MAIL_FROM. It is
+/// brand.toml's `name` (`cargo offrails brand` writes src/brand.rs). Never derived from the crate
+/// name: crates get renamed, products don't.
+pub const APP_NAME: &str = crate::brand::NAME;
+/// The tagline: brand.toml's `tagline` (`cargo offrails brand` writes src/brand.rs), the one
+/// source for the home page title ("Offrails Host: <tagline>"), the social card and any nav that
+/// shows it. Change it in brand.toml, never here.
+pub const APP_TAGLINE: &str = crate::brand::TAGLINE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppEnv {
@@ -35,13 +38,26 @@ pub struct TlsFiles {
 pub struct Config {
     pub env: AppEnv,
     pub database_url: String,
+    /// `DATABASE_POOL`: 4 for SQLite (one writer at a time; each connection keeps its own page
+    /// cache), 10 for Postgres.
     pub database_pool: u32,
+    /// `APP_WORKER_THREADS`: Tokio worker threads (default 2). Raise it for CPU-bound request work
+    /// on a box with more cores; I/O-bound apps rarely gain past 2–4.
+    pub worker_threads: usize,
+    /// `APP_BLOCKING_THREADS`: the cap on Tokio's blocking pool (default 16; Tokio's own is 512).
+    /// `spawn_blocking` work (static files, password hashing) queues past it instead of adding threads.
+    pub blocking_threads: usize,
     pub app_url: String,
     pub port: u16,
     /// `APP_SHUTDOWN_DRAIN_SECS`: how long open connections get after SIGTERM.
     pub shutdown_drain: Duration,
-    /// `APP_TRUSTED_PROXY`: trust the rightmost X-Forwarded-For hop (rate limiting).
+    /// `APP_TRUSTED_PROXY`: read the client IP from `X-Forwarded-For` (rate limiting).
     pub trusted_proxy: bool,
+    /// `APP_TRUSTED_PROXY_HOPS` (default 1): how many proxies append to `X-Forwarded-For` before
+    /// the app. The client is that many hops from the right: 1 behind one platform proxy (Fly, Render),
+    /// 2 behind Cloudflare → Caddy → app. Fewer than the real count takes a proxy's address
+    /// (every user shares one rate-limit key); more lets a client forge its address.
+    pub trusted_proxy_hops: u8,
     pub log_format: LogFormat,
     /// `APP_REVISION`: git sha of the build, shown on /dev/system.
     pub revision: Option<String>,
@@ -54,7 +70,7 @@ pub struct Config {
     /// `APP_ALLOWED_HOSTS`: extra `Host` names development answers (a tunnel, a LAN name);
     /// `.example.com` allows its subdomains too. Localhost and `APP_URL`'s host always work.
     pub allowed_hosts: Vec<String>,
-    /// `APP_ENV` was not set at all, so this runs as development: `main` warns loudly at boot.
+    /// Kept for parts that read it: always `false` now that an unset `APP_ENV` refuses to boot.
     pub env_defaulted: bool,
     // samples: config fields
 }
@@ -66,10 +82,13 @@ impl fmt::Debug for Config {
         d.field("env", &self.env)
             .field("database_url", &"[redacted]")
             .field("database_pool", &self.database_pool)
+            .field("worker_threads", &self.worker_threads)
+            .field("blocking_threads", &self.blocking_threads)
             .field("app_url", &self.app_url)
             .field("port", &self.port)
             .field("shutdown_drain", &self.shutdown_drain)
             .field("trusted_proxy", &self.trusted_proxy)
+            .field("trusted_proxy_hops", &self.trusted_proxy_hops)
             .field("log_format", &self.log_format)
             .field("revision", &self.revision)
             .field("tls", &self.tls.is_some())
@@ -149,21 +168,32 @@ fn is_localhost(url: &str) -> bool {
 impl Config {
     /// Called once in `main`. Collects ALL missing or invalid vars and fails with one message.
     pub fn from_env() -> anyhow::Result<Self> {
-        let raw_env = std::env::var("APP_ENV").ok();
-        let env = match raw_env.as_deref() {
-            None | Some("") | Some("development") => AppEnv::Development,
+        let get_env = || {
+            std::env::var("APP_ENV")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        };
+        // SECURITY: an unset APP_ENV is an error, never a default. Development mounts /dev tools
+        // without a login, so "forgot to set it on a server" must not silently become
+        // development. `.env` (bin/setup writes APP_ENV=development there) is read first, so
+        // `cargo run` in a set-up checkout still works; a production image has no `.env`
+        // (.dockerignore) and sets APP_ENV itself (test: an_unset_app_env_refuses_to_boot, kernel_test.rs).
+        if get_env().is_none() {
+            dotenvy::dotenv().ok();
+        }
+        let env = match get_env().as_deref() {
+            Some("development") => AppEnv::Development,
             Some("test") => AppEnv::Test,
             Some("production") => AppEnv::Production,
             Some(other) => {
                 anyhow::bail!("invalid APP_ENV: {other} (development | test | production)")
             }
+            None => anyhow::bail!(
+                "APP_ENV is not set. Locally: APP_ENV=development in .env (bin/setup creates it \
+                 from .env.example). On every server: APP_ENV=production (the Dockerfile sets it)."
+            ),
         };
-        if env == AppEnv::Development {
-            dotenvy::dotenv().ok();
-        }
-        // WHY: checked after `.env` loads, so `APP_ENV=development` in `.env` (bin/setup writes
-        // it) counts as set; only a truly unset APP_ENV (a server missing its config) warns.
-        let env_defaulted = std::env::var("APP_ENV").map_or(true, |v| v.trim().is_empty());
+        let env_defaulted = false;
 
         let get = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
         let mut missing: Vec<String> = Vec::new();
@@ -181,7 +211,10 @@ impl Config {
         };
         // PORT first: the development APP_URL default depends on it.
         let port = parse_num("PORT", 3000) as u16;
-        let database_pool = parse_num("DATABASE_POOL", 10) as u32;
+        // 0 = the backend's default, chosen below once DATABASE_URL is known.
+        let database_pool = parse_num("DATABASE_POOL", 0) as u32;
+        let worker_threads = (parse_num("APP_WORKER_THREADS", 2) as usize).max(1);
+        let blocking_threads = (parse_num("APP_BLOCKING_THREADS", 16) as usize).max(1);
         let shutdown_drain = Duration::from_secs(parse_num("APP_SHUTDOWN_DRAIN_SECS", 5));
         let dev_http_port = get("APP_DEV_HTTP_PORT").map(|v| {
             v.parse::<u16>().unwrap_or_else(|_| {
@@ -210,6 +243,11 @@ impl Config {
             }
             None => DEV_DATABASE_URL.into(),
         };
+        let database_pool = match database_pool {
+            0 if database_url.starts_with("sqlite:") => 4,
+            0 => 10,
+            n => n,
+        };
         if production && get("APP_URL").is_none() {
             missing.push("APP_URL".into());
         }
@@ -224,6 +262,17 @@ impl Config {
                 invalid.push("APP_TRUSTED_PROXY (expected true or false)".into());
                 false
             }
+        };
+
+        let trusted_proxy_hops = match get("APP_TRUSTED_PROXY_HOPS") {
+            None => 1,
+            Some(v) => match v.parse::<u8>() {
+                Ok(n) if n >= 1 => n,
+                _ => {
+                    invalid.push("APP_TRUSTED_PROXY_HOPS (expected a number from 1 to 255)".into());
+                    1
+                }
+            },
         };
 
         let bind = bind_address(env, get("APP_BIND").as_deref()).unwrap_or_else(|problem| {
@@ -260,10 +309,13 @@ impl Config {
             env,
             database_url,
             database_pool,
+            worker_threads,
+            blocking_threads,
             app_url,
             port,
             shutdown_drain,
             trusted_proxy,
+            trusted_proxy_hops,
             log_format,
             revision: get("APP_REVISION"),
             tls,
@@ -281,10 +333,13 @@ impl Config {
             env: AppEnv::Test,
             database_url: "sqlite::memory:".into(),
             database_pool: 5,
+            worker_threads: 2,
+            blocking_threads: 16,
             app_url: dev_app_url(3000, false),
             port: 3000,
             shutdown_drain: Duration::from_secs(5),
             trusted_proxy: false,
+            trusted_proxy_hops: 1,
             log_format: LogFormat::Pretty,
             revision: None,
             tls: None,
@@ -304,21 +359,9 @@ impl Config {
         self.env == AppEnv::Development
     }
 
-    /// Loud warnings `main` logs right after logging starts.
-    // SECURITY: an unset APP_ENV means development (so `cargo run` just works), and development
-    // mounts /dev tools without a login; on a server that is a missing setting, so it is said at
-    // every boot (test: an_unset_app_env_warns_at_boot).
+    /// Loud warnings `main` logs right after logging starts (parts add theirs here).
     pub fn boot_warnings(&self) -> Vec<String> {
-        let mut warnings = Vec::new();
-        if self.env_defaulted {
-            warnings.push(
-                "APP_ENV is not set, so this runs as DEVELOPMENT: /dev tools are mounted without a \
-                 login and errors show details. Set APP_ENV=production on every server (the \
-                 Dockerfile does); locally, APP_ENV=development in .env silences this."
-                    .to_owned(),
-            );
-        }
-        warnings
+        Vec::new()
     }
 }
 
@@ -370,22 +413,6 @@ mod tests {
                 false
             ),
             "https://app.example.com"
-        );
-    }
-
-    #[test]
-    fn an_unset_app_env_warns_at_boot() {
-        assert!(Config::test().boot_warnings().is_empty());
-        let unset = Config {
-            env: AppEnv::Development,
-            env_defaulted: true,
-            ..Config::test()
-        };
-        let warnings = unset.boot_warnings();
-        assert_eq!(warnings.len(), 1);
-        assert!(
-            warnings[0].contains("APP_ENV is not set")
-                && warnings[0].to_lowercase().contains("runs as development")
         );
     }
 
